@@ -1,0 +1,8 @@
+{
+  "settings": {
+    "max_entries": {
+      "label": "Maximum Entries",
+      "description": "The maximum number of Flatpak entries parsed at a time. Too many will make the plugin stop working!"
+    }
+  }
+}
