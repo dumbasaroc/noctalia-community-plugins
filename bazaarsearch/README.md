@@ -16,10 +16,10 @@ Noctalia Launcher.
 ## Requirements
 
 Requires both the `busctl` command (provided with `systemd` installs), as well
-as the Bazaar Flatpak store. Bazaar can be installed either system-wide via
+as the Bazaar Flatpak store. `bazaar` can be installed either system-wide via
 the package manager (preferred), or via Flatpak.
  - `busctl` is used exclusively to communicate with the Bazaar DBus instance
- - Bazaar is needed to provide the actual entries
+ - `bazaar` (whether the Flatpak or binary version) is needed to provide the actual entries
 
 ## Usage
 
