@@ -11,7 +11,18 @@ end
 
 
 -- Input sanitization function for user input (shell scripts)
--- As per 
+-- As per the Open Group Base Spec (https://pubs.opengroup.org/onlinepubs/9799919799/)
+-- definition of POSIX double quoting, the characters that retain special
+-- functionality are the quote, backslash, backquote, and dollar sign.
+-- This method simply removes all instances of these characters, as they
+-- generally shouldn't be needed for general purpose searches.
+--
+-- Returns the sanitized string
+
+local function userInputSanitize(s)
+  local retval, _ = s:gsub("[%$%`\"%\\]", "")
+  return retval
+end
 
 -- Takes in the item IDs from the iniial bazaar search, then
 -- gets metadata and adds them into rows
@@ -109,7 +120,7 @@ local function initialBazaarSearch(query)
     .. "/io/github/kolunmi/Bazaar/SearchProvider "
     .. "org.gnome.Shell.SearchProvider2 "
     .. "GetInitialResultSet "
-    .. "as 1 '" .. text:gsub("'", "\\'") .. "'",
+    .. "as 1 \"" .. userInputSanitize(text) .. "\"",
 
     function(result)
       if result.exitCode ~= 0 then
