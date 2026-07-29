@@ -15,11 +15,6 @@ Noctalia Launcher.
 
 ## Requirements
 
-<!-- Required when plugin.toml declares dependencies. Mention every dependency
-     using its exact manifest name, for example `example-cli`. Include any
-     authentication, hardware, service, or compositor requirements too. Remove
-     this section only when the plugin has no requirements. -->
-
 Requires both the `busctl` command (provided with `systemd` installs), as well
 as the Bazaar Flatpak store. Bazaar can be installed either system-wide via
 the package manager (preferred), or via Flatpak.
@@ -38,22 +33,7 @@ Simply type `/bzr <search terms>` into your launcher, and the plugin will use
 Bazaar to find Flatpaks based on the search criteria. To open the application's
 page in Bazaar, simply click on the entry or press `ENTER` on an entry to select it.
 
-<!-- Explain how to add or access every user-facing entry and describe the normal -->
-<!-- workflow. Use exact labels and ids. For a panel, include its copy-pasteable IPC -->
-<!-- command: -->
-<!---->
-<!-- ```sh -->
-<!-- noctalia msg panel-toggle <author>/<plugin>:<panel-id> -->
-<!-- ``` -->
-<!---->
-<!-- For a launcher provider, explain what to type after `/<prefix>` and what -->
-<!-- activating a result does. For a shortcut, say where users add it in Settings. -->
-
 ## Settings
-
-<!-- Required when plugin.toml declares settings. Describe behavior and units,
-     especially for settings whose effect is not obvious from the label. A
-     table like the official plugin READMEs is recommended. -->
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -61,10 +41,6 @@ page in Bazaar, simply click on the entry or press `ENTER` on an entry to select
 
 
 ## Notes
-
-<!-- Optional. Document important side effects and limitations: network access,
-     files written, commands spawned, sensitive data, compositor support, and
-     useful debugging information. -->
 
 - As stated under **Usage**, please make sure that the Bazaar background
 service is running before using this plugin. Generally, this can and
