@@ -1,3 +1,18 @@
+-- Input sanitization function for Flatpak IDs
+-- As per Flatpak (https://docs.flatpak.org/en/latest/conventions.html)
+-- and the DBus naming convention (https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names),
+-- the only allowed characters in Flatpak IDs are "[a-z][A-Z][0-9]_-."
+--
+-- Returns the sanitized string
+local function flatpakIDSanitize(s)
+  local retval, _ = s:gsub("[^[a-z][A-Z][0-9]_%-%.]", "")
+  return retval
+end
+
+
+-- Input sanitization function for user input (shell scripts)
+-- As per 
+
 -- Takes in the item IDs from the iniial bazaar search, then
 -- gets metadata and adds them into rows
 -- @param query The query string (needed for setting the results)
@@ -59,12 +74,15 @@ local function getMetadata(query, entriesString, expectedNumElements)
       -- bunch of things if we want to
       local entry_data = busdata["data"][1]
       for i = 1, #entry_data do
-        table.insert(rows, {
-          id = entry_data[i]["id"]["data"],
-          title = entry_data[i]["name"]["data"],
-          icon = entry_data[i]["gicon"] and entry_data[i]["gicon"]["data"] or "check",
-          subtitle = entry_data[i]["description"] and entry_data[i]["description"]["data"] or "",
-        })
+        local sanitized_fpkid = flatpakIDSanitize(entry_data[i]["id"]["data"])
+        if sanitized_fpkid == entry_data[i]["id"]["data"] then
+          table.insert(rows, {
+            id = sanitized_fpkid,
+            title = entry_data[i]["name"]["data"],
+            icon = entry_data[i]["gicon"] and entry_data[i]["gicon"]["data"] or "check",
+            subtitle = entry_data[i]["description"] and entry_data[i]["description"]["data"] or "",
+          })
+        end
       end
 
       launcher.setResults(query, rows)
@@ -131,14 +149,24 @@ local function initialBazaarSearch(query)
       local obtained_entries = busdata["data"][1]
       -- ### HERE IS WHERE WE MINIMIZE THE NUMBER OF ENTRIES WE PARSE ### --
       local n_elem_to_count = math.min(noctalia.getConfig("max_entries"), #obtained_entries)
-      local entries_string = "as " .. tostring(n_elem_to_count)
+      local actual_elem_added = 0
+      local entries_string = ""
       for i = 1, n_elem_to_count do
-        -- simply append the name of the ID in quotes to the entries string
-        entries_string = entries_string .. " \"" .. obtained_entries[i] .. "\""
+        -- Sanitize Flatpak ID (just in case of malicious input)
+        local sanitized_fpkid = flatpakIDSanitize(obtained_entries[i])
+        -- If sanitized ID does not match given ID, skip this. We don't want
+        -- any shenanigans happening.
+        if sanitized_fpkid == obtained_entries[i] then
+          entries_string = entries_string .. " \"" .. sanitized_fpkid .. "\""
+          actual_elem_added = actual_elem_added + 1
+        end
       end
 
+      -- Craft the cmd input for stage 2
+      entries_string = "as " .. tostring(actual_elem_added) .. entries_string
+
       -- Proceed to step 2 of getting entries
-      getMetadata(query, entries_string, n_elem_to_count)
+      getMetadata(query, entries_string, actual_elem_added)
     end
   )
 end
