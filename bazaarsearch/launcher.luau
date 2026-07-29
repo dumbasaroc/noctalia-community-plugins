@@ -167,7 +167,7 @@ function onActivate(id)
      .. "/io/github/kolunmi/Bazaar/SearchProvider "
      .. "org.gnome.Shell.SearchProvider2 "
      .. "ActivateResult "
-     .. "sasu \"" .. id .. "\" 0 $(date +%s)" 
+     .. "sasu \"" .. id .. "\" 0 " .. tostring(os.time()) 
     )
   end
 end
