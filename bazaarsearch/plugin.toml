@@ -9,7 +9,7 @@ author = "DumbAsARoc"
 license = "GPL-3.0"
 icon = "package"
 description = "A launcher plugin to search for Flatpaks through Bazaar"
-dependencies = [ "bazaar, busctl" ]
+dependencies = [ "bazaar", "busctl" ]
 tags = [ "launcher", "system", "utility" ]
 
 
