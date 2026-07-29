@@ -24,6 +24,42 @@ local function userInputSanitize(s)
   return retval
 end
 
+-- Class definition for createErrorReport param type
+type ErrReport = {
+  cmd_string: string?,
+  stage: string?,
+  query: string,
+  err_title: string,
+  err_body: string?,
+}
+
+-- Helper function to generate an error entry in the case
+-- that something goes wrong
+-- 
+-- 
+local function createErrorReport(data: ErrReport)
+  local cmd_string = data["cmd_string"] and tostring(data["cmd_string"]) or "no command provided"
+  local stage = data["stage"] and tostring(data["stage"]) or "no stage provided"
+  local query = data["query"] and tostring(data["query"]) or "no query provided"
+  local err_title = data["err_title"] and tostring(data["err_title"]) or "no error title provided"
+  local err_body = data["err_body"] and tostring(data["err_body"]) or ""
+
+  local full_err_msg = "ERROR REPORT\n"
+                    .. "Stage: " .. stage .. "\n"
+                    .. "Command: " .. cmd_string .. "\n"
+                    .. "Query: " .. query .. "\n"
+                    .. "Error: " .. err_title .. "\n"
+                    .. err_body
+
+
+  launcher.setResults(query, {{
+    id = "bzrerror:" .. full_err_msg,
+    title = err_title,
+    subtitle = "Select this to copy an error report for the maintainer.",
+    glpyh = "toast-error"
+  }})
+end
+
 -- Takes in the item IDs from the iniial bazaar search, then
 -- gets metadata and adds them into rows
 -- @param query The query string (needed for setting the results)
@@ -31,46 +67,51 @@ local function getMetadata(query, entriesString, expectedNumElements)
   
   -- Construct our second command, this time getting metadata
   -- from the GetResultMetas DBus function
-  local cmd_ok = noctalia.runAsync(
-    "busctl --user --json=short "
-    .. "call io.github.kolunmi.Bazaar "
-    .. "/io/github/kolunmi/Bazaar/SearchProvider "
-    .. "org.gnome.Shell.SearchProvider2 "
-    .. "GetResultMetas "
-    .. entriesString,
+  
+  local cmd_string = "busctl --user --json=short "
+                  .. "call io.github.kolunmi.Bazaar "
+                  .. "/io/github/kolunmi/Bazaar/SearchProvider "
+                  .. "org.gnome.Shell.SearchProvider2 "
+                  .. "GetResultMetas "
+                  .. entriesString
+
+  noctalia.runAsync(cmd_string,
     function(result)
 
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "'busctl' failed with exit code " .. tostring(result.exitCode),
-          subtitle = result.stderr,
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "getMetadata",
+          query = query,
+          err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
+          err_body = result.stderr
+        })
         return
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "Failed to parse 'busctl' JSON data",
-          subtitle = err,
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "getMetadata",
+          err_title = "Failed to parse 'busctl' JSON data",
+          err_body = err,
+          query = query,
+        })
         return
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "aa{sv}" then
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "Search returned malformed value - arraystring identifier is incorrect",
-          subtitle = "Expected \"aa{sv}\", got \"" .. busdata["type"] .. "\"",
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "getMetadata",
+          query = query,
+          err_title = "Search returned malformed value - 'busctl' return type identifier is incorrect",
+          err_body = "Expected \"aa{sv}\", got \"" .. busdata["type"] .. "\"",
+        })
         return
       end
 
@@ -97,12 +138,6 @@ local function getMetadata(query, entriesString, expectedNumElements)
       end
 
       launcher.setResults(query, rows)
-
-      -- launcher.setResults(query, {{
-      --   id = "nilnil",
-      --   title = "Correct so far",
-      --   glyph = "check",
-      -- }})
     end
   )
 end
@@ -112,48 +147,52 @@ end
 -- search interface, and gets a list of things that match
 local function initialBazaarSearch(query)
   local text = noctalia.string.trim(query)
-  local cmd_ok = noctalia.runAsync(
-    "busctl "
-    .. "--user --json=short "
-    .. "call "
-    .. "io.github.kolunmi.Bazaar "
-    .. "/io/github/kolunmi/Bazaar/SearchProvider "
-    .. "org.gnome.Shell.SearchProvider2 "
-    .. "GetInitialResultSet "
-    .. "as 1 \"" .. userInputSanitize(text) .. "\"",
+  local cmd_string = "busctl "
+                  .. "--user --json=short "
+                  .. "call "
+                  .. "io.github.kolunmi.Bazaar "
+                  .. "/io/github/kolunmi/Bazaar/SearchProvider "
+                  .. "org.gnome.Shell.SearchProvider2 "
+                  .. "GetInitialResultSet "
+                  .. "as 1 \"" .. userInputSanitize(text) .. "\""
 
+  noctalia.runAsync(
+    cmd_string,
     function(result)
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "'busctl' failed with exit code " .. tostring(result.exitCode),
-          subtitle = result.stderr,
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "initialBazaarSearch",
+          query = query,
+          err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
+          err_body = result.stderr
+        })
         return
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "Failed to parse 'busctl' JSON data",
-          subtitle = err,
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "initialBazaarSearch",
+          err_title = "Failed to parse 'busctl' JSON data",
+          err_body = err,
+          query = query,
+        })
         return
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "as" then
-        launcher.setResults(query, {{
-          id = "nilnil",
-          title = "Search returned malformed value - arraystring identifier is incorrect",
-          subtitle = "Expected \"as\", got \"" .. busdata["type"] .. "\"",
-          glpyh = "toast-error",
-        }})
+        createErrorReport({
+          cmd_string = cmd_string,
+          stage = "initialBazaarSearch",
+          err_title = "Search returned malformed value - arraystring identifier is incorrect",
+          err_body = "Expected \"as\", got \"" .. busdata["type"] .. "\"",
+          query = query,
+        })
         return
       end
 
@@ -186,12 +225,13 @@ end
 function onQuery(query)
   if not noctalia.commandExists("busctl") then
     -- No busctl command, display error
-    launcher.setResults(query, {{
-      id = "nilnil",
-      title = "'busctl' is not found",
-      subtitle = "Please install the 'busctl' command, this plugin requires it to work!",
-      glyph = "toast-error",
-    }})
+    createErrorReport({
+      cmd_string = "noctalia.commandExists(\"busctl\")",
+      query = query,
+      stage = "onQuery",
+      err_title = "'busctl' is not found in the PATH",
+      err_body = "Please make sure that 'busctl' is installed and is correctly set somewhere along the PATH",
+    })
     return
   end
   initialBazaarSearch(query)
@@ -199,14 +239,25 @@ end
 
 --onActivate is what is called when we press Enter on something
 function onActivate(id)
+  local errmsg = id:match("^bzrerror:(.+)$")
+  if errmsg then
+    noctalia.copyToClipboard(errmsg, "text/plain")
+    noctalia.notify("Bazaar Search Error", "Error message copied to clipboard.")
+    return
+  end
   if id ~= "" then
-    noctalia.runAsync(
-     "busctl --user "
-     .. " call io.github.kolunmi.Bazaar "
-     .. "/io/github/kolunmi/Bazaar/SearchProvider "
-     .. "org.gnome.Shell.SearchProvider2 "
-     .. "ActivateResult "
-     .. "sasu \"" .. id .. "\" 0 " .. tostring(os.time()) 
-    )
+    local sanitized_fltpk = flatpakIDSanitize(id)
+    if sanitized_fltpk == id then
+      noctalia.runAsync(
+        "busctl --user "
+        .. " call io.github.kolunmi.Bazaar "
+        .. "/io/github/kolunmi/Bazaar/SearchProvider "
+        .. "org.gnome.Shell.SearchProvider2 "
+        .. "ActivateResult "
+        .. "sasu \"" .. id .. "\" 0 " .. tostring(os.time()) 
+      )
+    else
+      noctalia.notifyError("Bazaar Search Error", "Selected Flatpak ID failed sanitization check, ignoring launch command.")
+    end
   end
 end
