@@ -3,7 +3,7 @@
 
 id = "dumbasaroc/bazaarsearch"
 name = "Bazaar Search"
-version = "0.1.0"
+version = "1.0.0"
 plugin_api = 3
 author = "DumbAsARoc"
 description = "A launcher plugin to search for Flatpaks through Bazaar"
