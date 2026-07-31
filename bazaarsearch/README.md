@@ -33,11 +33,17 @@ Simply type `/bzr <search terms>` into your launcher, and the plugin will use
 Bazaar to find Flatpaks based on the search criteria. To open the application's
 page in Bazaar, simply click on the entry or press `ENTER` on an entry to select it.
 
+Additionally, with the `testmode_enable` setting enabled, the user will be able
+to user `/bzr .dbg`. This is meant specifically for debugging purposes, and will
+run unit tests defined in the plugin and put the results into the launcher. This
+is disabled by default.
+
 ## Settings
 
 | Setting | Type | Default | Description |
 | --- | --- | --- | --- |
 | `max_entries` | `int` | `50` | Defines the number of entries the plugin will pull at once. If it tries to pull too many, the plugin will fail due to CPU compute time! |
+| `testmode_enable` | `bool` | `false` | If enabled, a separate command (`/bzr .dbg` will be enabled. This command runs unit tests and puts the results into the launcher for debugging purposes. |
 
 
 ## Notes

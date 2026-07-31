@@ -1,10 +1,49 @@
+--!strict
+
+-- ============================= --
+-- ====== TYPES DEFINITION ===== --
+-- ============================= --
+
+-- Type definition for createErrorReport param type
+type ErrReport = {
+  cmd_string: string?,  -- The command run before this error
+  stage: string?,       -- The function this error was called from
+  query: string,        -- The query string the user input. Required.
+  err_title: string,    -- The title this error should display. Required.
+  err_body: string?,    -- The subtitle (body) this error should display.
+}
+
+-- Type definition for the return value of initialBazaarSearch()
+type InitialBazaarSearchReturn = {
+  entries_string: string, -- The string generated for the command in getMetadata()
+  num_elem: number,       -- The number of elements inside of `entries_string`
+}
+
+type Ok<T> = { ok: true, data: T }
+type Err<E> = { ok: false, err: E }
+type Result<T, E> = Ok<T> | Err<E>
+
+local function makeOk<T>(data: T): Ok<T>
+  return { ok = true, data = data }
+end
+
+local function makeErr<E>(err: E): Err<E>
+  return { ok = false, err = err }
+end
+
+
+
+-- ================================= --
+-- ===== APPLICATION FUNCTIONS ===== --
+-- ================================= --
+
 -- Input sanitization function for Flatpak IDs
 -- As per Flatpak (https://docs.flatpak.org/en/latest/conventions.html)
 -- and the DBus naming convention (https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol-names),
 -- the only allowed characters in Flatpak IDs are "[a-z][A-Z][0-9]_-."
 --
 -- Returns the sanitized string
-local function flatpakIDSanitize(s)
+local function flatpakIDSanitize(s: string): string
   local retval, _ = s:gsub("[^[a-z][A-Z][0-9]_%-%.]", "")
   return retval
 end
@@ -18,26 +57,18 @@ end
 -- generally shouldn't be needed for general purpose searches.
 --
 -- Returns the sanitized string
-
-local function userInputSanitize(s)
-  local retval, _ = s:gsub("[%$%`\"%\\]", "")
+local function userInputSanitize(s: string): string
+  local retval, _ = s:gsub("[%$`\"\\\\]", "")
   return retval
 end
 
--- Class definition for createErrorReport param type
-type ErrReport = {
-  cmd_string: string?,
-  stage: string?,
-  query: string,
-  err_title: string,
-  err_body: string?,
-}
 
 -- Helper function to generate an error entry in the case
 -- that something goes wrong
--- 
--- 
-local function createErrorReport(data: ErrReport)
+--
+-- Returns a table row that the launcher will put as an
+-- entry.
+local function createErrorReport(data: ErrReport): LauncherResult
   local cmd_string = data["cmd_string"] and tostring(data["cmd_string"]) or "no command provided"
   local stage = data["stage"] and tostring(data["stage"]) or "no stage provided"
   local query = data["query"] and tostring(data["query"]) or "no query provided"
@@ -52,18 +83,20 @@ local function createErrorReport(data: ErrReport)
                     .. err_body
 
 
-  launcher.setResults(query, {{
+  return {
     id = "bzrerror:" .. full_err_msg,
     title = err_title,
     subtitle = "Select this to copy an error report for the maintainer.",
     glpyh = "toast-error"
-  }})
+  }
 end
 
 -- Takes in the item IDs from the iniial bazaar search, then
 -- gets metadata and adds them into rows
--- @param query The query string (needed for setting the results)
-local function getMetadata(query, entriesString, expectedNumElements)
+--
+-- Returns rows generated, or an optional error row in the
+-- case of problems arising.
+local function getMetadata(query: string, bzr_search_data: InitialBazaarSearchReturn): Result<{LauncherResult}, LauncherResult>
   
   -- Construct our second command, this time getting metadata
   -- from the GetResultMetas DBus function
@@ -73,46 +106,43 @@ local function getMetadata(query, entriesString, expectedNumElements)
                   .. "/io/github/kolunmi/Bazaar/SearchProvider "
                   .. "org.gnome.Shell.SearchProvider2 "
                   .. "GetResultMetas "
-                  .. entriesString
+                  .. bzr_search_data.entries_string
 
   noctalia.runAsync(cmd_string,
     function(result)
 
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "getMetadata",
           query = query,
           err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
           err_body = result.stderr
-        })
-        return
+        }))
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "getMetadata",
           err_title = "Failed to parse 'busctl' JSON data",
           err_body = err,
           query = query,
-        })
-        return
+        }))
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "aa{sv}" then
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "getMetadata",
           query = query,
           err_title = "Search returned malformed value - 'busctl' return type identifier is incorrect",
           err_body = "Expected \"aa{sv}\", got \"" .. busdata["type"] .. "\"",
-        })
-        return
+        }))
       end
 
       
@@ -137,15 +167,24 @@ local function getMetadata(query, entriesString, expectedNumElements)
         end
       end
 
-      launcher.setResults(query, rows)
+      return makeOk(rows)
     end
   )
+
+  return makeErr(createErrorReport({
+    stage = "getMetadata",
+    query = query,
+    err_title = "Somehow got out of command execution",
+  }))
 end
 
 
 -- Takes in the search parameter, passes it to the DBus
 -- search interface, and gets a list of things that match
-local function initialBazaarSearch(query)
+--
+-- Returns the data necessary for getMetadata and optionally
+-- an error, if something went wrong.
+local function initialBazaarSearch(query): Result<InitialBazaarSearchReturn, LauncherResult>
   local text = noctalia.string.trim(query)
   local cmd_string = "busctl "
                   .. "--user --json=short "
@@ -161,39 +200,36 @@ local function initialBazaarSearch(query)
     function(result)
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           query = query,
           err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
           err_body = result.stderr
-        })
-        return
+        }))
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           err_title = "Failed to parse 'busctl' JSON data",
           err_body = err,
           query = query,
-        })
-        return
+        }))
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "as" then
-        createErrorReport({
+        return makeErr(createErrorReport({
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           err_title = "Search returned malformed value - arraystring identifier is incorrect",
           err_body = "Expected \"as\", got \"" .. busdata["type"] .. "\"",
           query = query,
-        })
-        return
+        }))
       end
 
       local obtained_entries = busdata["data"][1]
@@ -216,29 +252,64 @@ local function initialBazaarSearch(query)
       entries_string = "as " .. tostring(actual_elem_added) .. entries_string
 
       -- Proceed to step 2 of getting entries
-      getMetadata(query, entries_string, actual_elem_added)
+      return makeOk({ entries_string = entries_string, num_elem = actual_elem_added })
     end
   )
+
+  return makeErr(createErrorReport({
+    stage = "initialBazaarSearch",
+    query = query,
+    err_title = "Somehow got out of command execution",
+  }))
 end
 
 -- onQuery is what we call when the search text changes
 function onQuery(query)
   if not noctalia.commandExists("busctl") then
     -- No busctl command, display error
-    createErrorReport({
+    launcher.setResults(query, {createErrorReport({
       cmd_string = "noctalia.commandExists(\"busctl\")",
       query = query,
       stage = "onQuery",
       err_title = "'busctl' is not found in the PATH",
       err_body = "Please make sure that 'busctl' is installed and is correctly set somewhere along the PATH",
-    })
+    })})
     return
   end
-  initialBazaarSearch(query)
+
+  -- Test mode enabled, as well as typing in test phrase
+  if noctalia.getConfig("testmode_enable") and query == ".dbg" then
+    launcher.setResults(query, {{
+      id = "test:test",
+      title = "Testmode Active",
+    }})
+    return
+  end
+
+  -- Otherwise, do Bazaar search
+  local result_step1: Result<InitialBazaarSearchReturn, LauncherResult> = initialBazaarSearch(query)
+  if not result_step1.ok then
+    -- something went wrong in first part, display said
+    -- error to user
+    launcher.setResults(query, { result_step1.err })
+    return
+  end
+
+  -- Step 2 of Bazaar search
+  local step1_entries: InitialBazaarSearchReturn = result_step1.data
+  local result_step2 = getMetadata(query, step1_entries)
+  if not result_step2.ok then
+    launcher.setResults(query, { result_step2.err} )
+    return
+  end
+
+  -- Everything seems to have gone okay, so put results on screen
+  local entries: {LauncherResult} = result_step2.data
+  launcher.setResults(query, entries)
 end
 
 --onActivate is what is called when we press Enter on something
-function onActivate(id)
+function onActivate(id: string)
   local errmsg = id:match("^bzrerror:(.+)$")
   if errmsg then
     noctalia.copyToClipboard(errmsg, "text/plain")
