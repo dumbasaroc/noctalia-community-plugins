@@ -19,6 +19,9 @@ type BzrInitialSearchReturn = {
   num_elem: number,       -- The number of elements inside of `entries_string`
 }
 
+-- Type definition for any bzrNotifyError functions
+type BzrNotifyErrorFunction = (query: string, error: BzrErrReport) -> ()
+
 -- Imitating Rust Result<> type via Lua
 
 type BzrOk<T> = { ok: true, data: T }
@@ -36,6 +39,15 @@ end
 local function bzrMakeErr<E>(err: E): BzrErr<E>
   return { ok = false, err = err }
 end
+
+
+-- ======================== --
+-- ===== GLOBAL STATE ===== --
+-- ======================== --
+
+-- The most recent query that should be searched for.
+-- Updated in onQuery()
+local BZR_CURRENT_QUERY: string | nil = nil
 
 
 
@@ -114,12 +126,65 @@ local function bzrCreateErrorReport(data: BzrErrReport): LauncherResult
   }
 end
 
+
+-- This is called after any async process to:
+--   1. Check that the query has not changed (and therefore
+--      invalidates the busctl output from the previous step)
+--   2. Continue onto the next stage of the process (executing
+--      the provided callback function)
+-- bzrNotify (and the future bzrNotifyTestError) are here as
+-- help for the builtin test command `/bzr .dbg`, since we
+-- use these methods to inspect data in between steps.
+local function bzrNotify(query: string, callback: () -> ())
+  -- Stop execution of process if the query is not the same
+  -- as the global current query, since we are offset from
+  -- what the user wants.
+  if query ~= BZR_CURRENT_QUERY then
+    return
+  end
+
+  -- Continue onto the next part of the process
+  callback()
+end
+
+
+-- Similarly to bzrNotify(), this is called during an
+-- async process, however this is done when an error occurs.
+-- Will either stop execution entirely if the query has changed,
+-- or will display the provided error row and change the global
+-- query to `nil` (aka. handled)
+local function bzrNotifyError(query: string, error: BzrErrReport)
+  -- Stop execution if query has changed
+  if query ~= BZR_CURRENT_QUERY then
+    return
+  end
+
+  -- We are handling this query, so change the global state to nil
+  BZR_CURRENT_QUERY = nil
+
+  launcher.setResults(query, { bzrCreateErrorReport(error) })
+end
+
+
+-- Called after success of bzrGetMetadata and passing bzrNotify.
+-- Simply ensures that the query has not changed, then posts the
+-- results into the launcher.
+local function bzrFinishQuery(query: string, rows: {LauncherResult})
+  -- Stop execution if query has changed
+  if query ~= BZR_CURRENT_QUERY then
+    return
+  end
+
+  BZR_CURRENT_QUERY = nil
+  launcher.setResults(query, rows)
+end
+
 -- Takes in the item IDs from the iniial bazaar search, then
 -- gets metadata and adds them into rows
 --
 -- Returns rows generated, or an optional error row in the
 -- case of problems arising.
-local function bzrGetMetadata(query: string, bzr_search_data: BzrInitialSearchReturn): BzrResult<{LauncherResult}, LauncherResult>
+local function bzrGetMetadata(query: string, bzr_search_data: BzrInitialSearchReturn, bzr_err_func: BzrNotifyErrorFunction)
   
   -- Construct our second command, this time getting metadata
   -- from the GetResultMetas DBus function
@@ -136,36 +201,36 @@ local function bzrGetMetadata(query: string, bzr_search_data: BzrInitialSearchRe
 
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "getMetadata",
           query = query,
           err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
           err_body = result.stderr
-        }))
+        })
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "getMetadata",
           err_title = "Failed to parse 'busctl' JSON data",
           err_body = err,
           query = query,
-        }))
+        })
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "aa{sv}" then
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "getMetadata",
           query = query,
           err_title = "Search returned malformed value - 'busctl' return type identifier is incorrect",
           err_body = "Expected \"aa{sv}\", got \"" .. busdata["type"] .. "\"",
-        }))
+        })
       end
 
       
@@ -190,15 +255,9 @@ local function bzrGetMetadata(query: string, bzr_search_data: BzrInitialSearchRe
         end
       end
 
-      return bzrMakeOk(rows)
+      return bzrNotify(query, function() bzrFinishQuery(query, rows) end)
     end
   )
-
-  return bzrMakeErr(bzrCreateErrorReport({
-    stage = "getMetadata",
-    query = query,
-    err_title = "Somehow got out of command execution",
-  }))
 end
 
 
