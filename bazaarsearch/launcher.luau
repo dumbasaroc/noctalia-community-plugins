@@ -22,6 +22,21 @@ type BzrInitialSearchReturn = {
 -- Type definition for any bzrNotifyError functions
 type BzrNotifyErrorFunction = (query: string, error: BzrErrReport) -> ()
 
+-- Type definition for callback tables passed into bzr methods
+type BzrCallbackTable = {
+  -- Function call made when going to "bzrGetMetadata()" step
+  get_meta_func: ((query: string, initial_bazaar_search: BzrInitialSearchReturn, callbacks: BzrCallbackTable) -> ())?,
+  -- Function call made when going to "bzrInitialSearch()" step
+  initial_search_func: ((query: string, callbacks: BzrCallbackTable) -> ())?,
+  -- Function call for transitioning between multiple steps
+  bzr_notify_func: ((query: string, initial_bazaar_search: BzrInitialSearchReturn, callbacks: BzrCallbackTable) -> ())?,
+  -- Error call made when error is found in "bzrInitialSearch()"
+  bzr_notify_error_initsearch_func: BzrNotifyErrorFunction?,
+  -- Error call made when error is found in "bzrGetMetadata()"
+  bzr_notify_error_getmetadata_func: BzrNotifyErrorFunction?,
+}
+
+
 -- Imitating Rust Result<> type via Lua
 
 type BzrOk<T> = { ok: true, data: T }
@@ -40,6 +55,66 @@ local function bzrMakeErr<E>(err: E): BzrErr<E>
   return { ok = false, err = err }
 end
 
+type BzrTestTable = {
+  order: { string },
+  categories: { [string]: BzrTestCategory },
+}
+type BzrTestCategory = {
+  id: string,
+  name: string,
+  description: string,
+  -- The order to display the tests in
+  order: {string},
+  tests: { [string]: BzrTestDescriptor },
+}
+type BzrTestDescriptor = {
+  id: string,
+  name: string,
+  description: string,
+  test_fn: () -> BzrTestResult,
+  result: BzrTestResult?,
+}
+type BzrTestResult = BzrResult<nil, string>
+
+-- Helper function to create BzrTestTable
+local function bzrCreateTestTable(categories: {BzrTestCategory}): BzrTestTable
+  local order: {string} = {}
+  local cats: {[string]: BzrTestCategory} = {}
+
+  for i=1,#categories do
+    table.insert(order, categories[i].id)
+    cats[categories[i].id] = categories[i]
+  end
+  return {
+    order = order,
+    categories = cats,
+  }
+end
+
+-- Helper function to create BzrTestCategory
+local function bzrCreateTestCategory
+(
+  data: { id: string, name: string, description: string },
+  tests: {BzrTestDescriptor}
+): BzrTestCategory
+  
+  local order: {string} = {}
+  local test_descs: {[string]: BzrTestDescriptor} = {}
+
+  for i=1,#tests do
+    table.insert(order, tests[i].id)
+    test_descs[tests[i].id] = tests[i]
+  end
+  return {
+    name = data.name,
+    id = data.id,
+    description = data.description,
+    order = order,
+    tests = test_descs,
+  }
+end
+
+
 
 -- ======================== --
 -- ===== GLOBAL STATE ===== --
@@ -48,7 +123,6 @@ end
 -- The most recent query that should be searched for.
 -- Updated in onQuery()
 local BZR_CURRENT_QUERY: string | nil = nil
-
 
 
 -- ================================= --
@@ -266,8 +340,8 @@ end
 --
 -- Returns the data necessary for getMetadata and optionally
 -- an error, if something went wrong.
-local function bzrInitialSearch(query): BzrResult<BzrInitialSearchReturn, LauncherResult>
-  local text = noctalia.string.trim(query)
+local function bzrInitialSearch(query: string, bzr_err_func: BzrNotifyErrorFunction)
+  local text: string = noctalia.string.trim(query)
   local cmd_string = "busctl "
                   .. "--user --json=short "
                   .. "call "
@@ -282,36 +356,36 @@ local function bzrInitialSearch(query): BzrResult<BzrInitialSearchReturn, Launch
     function(result)
       if result.exitCode ~= 0 then
         -- busctl failed, print stderr so we can see why
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           query = query,
           err_title = "'busctl' failed with exit code " .. tostring(result.exitCode),
           err_body = result.stderr
-        }))
+        })
       end
 
       -- Get Tabular version of data thanks to JSON parsing
       local busdata, err = noctalia.json.decode(result.stdout)
       if not busdata then
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           err_title = "Failed to parse 'busctl' JSON data",
           err_body = err,
           query = query,
-        }))
+        })
       end
 
       -- Double check the parameter type
       if busdata["type"] ~= "as" then
-        return bzrMakeErr(bzrCreateErrorReport({
+        return bzr_err_func(query, {
           cmd_string = cmd_string,
           stage = "initialBazaarSearch",
           err_title = "Search returned malformed value - arraystring identifier is incorrect",
           err_body = "Expected \"as\", got \"" .. busdata["type"] .. "\"",
           query = query,
-        }))
+        })
       end
 
       local obtained_entries = busdata["data"][1]
@@ -334,64 +408,359 @@ local function bzrInitialSearch(query): BzrResult<BzrInitialSearchReturn, Launch
       entries_string = "as " .. tostring(actual_elem_added) .. entries_string
 
       -- Proceed to step 2 of getting entries
-      return bzrMakeOk({ entries_string = entries_string, num_elem = actual_elem_added })
+      return bzrNotify(query, function()
+        bzrGetMetadata(query, { entries_string = entries_string, num_elem = actual_elem_added }, bzr_err_func)
+      end)
     end
   )
-
-  return bzrMakeErr(bzrCreateErrorReport({
-    stage = "initialBazaarSearch",
-    query = query,
-    err_title = "Somehow got out of command execution",
-  }))
 end
+
+
+
+-- ============================================= --
+-- ===== TEST MODE FUNCTIONS AND HARNESSES ===== --
+-- ============================================= --
+
+
+-- ================================= --
+-- ===== TEST MODE DESCRIPTORS ===== --
+-- ================================= --
+
+-- === SECTION: bzrFlatpakIDSanitize VALIDATION === --
+local BZR_FLATPAK_SANITIZE_TESTS: BzrTestCategory = bzrCreateTestCategory(
+  {
+    id = "fpk_sanitize",
+    name = "Flatpak ID Sanitization",
+    description = "Tests relating to the bzrFlatpakIDSanitize() function",
+  },
+  {
+    {
+      id = "test_ValidFpkIDStaysSame",
+      name = "Valid Flatpak IDs stay the same",
+      description = "Tests that valid Flatpak IDs do not get changed after sanitization",
+      test_fn = function()
+        local correct_fpkid: string = "org.test.Test"
+        local correct_fpkid2: string = "com.microsoft.Minecraft.MinecraftPE"
+        
+        local sanitized_fpkid: string = bzrFlatpakIDSanitize(correct_fpkid)
+        local sanitized_fpkid2: string = bzrFlatpakIDSanitize(correct_fpkid2)
+        if sanitized_fpkid ~= correct_fpkid then
+          return bzrMakeErr("Expected \"" .. correct_fpkid .. "\" to stay the same, got \"" .. sanitized_fpkid .. "\"")
+        end
+
+        if sanitized_fpkid2 ~= correct_fpkid2 then
+          return bzrMakeErr("Expected \"" .. correct_fpkid2 .. "\" to stay the same, got \"" .. sanitized_fpkid2 .. "\"")
+        end
+
+        return bzrMakeOk(nil)
+      end,
+    },
+    {
+      id = "test_InvalidFpkIDSanitization",
+      name = "Invalid Flatpaks are Sanitized Properly",
+      description = "Tests that Flatpak IDs with invalid characters are sanitized correctly",
+      test_fn = function()
+        local input_fpkid: string = "hell'o.inva$id.n0"
+        local correct_sanitized_fpkid: string = "hello.invaid.n0"
+        local sanitized_fpkid: string = bzrFlatpakIDSanitize(input_fpkid)
+
+        if sanitized_fpkid ~= correct_sanitized_fpkid then
+          return bzrMakeErr(
+            "Sanitized \"" .. input_fpkid .. "\", expected \"" ..
+            correct_sanitized_fpkid .. "\", but got back \"" .. sanitized_fpkid .. "\""
+          )
+        end
+
+        return bzrMakeOk(nil)
+      end,
+    },
+
+    {
+      id = "test_AutoFail",
+      name = "This should automatically fail",
+      description = "This should automatically fail",
+      test_fn = function() return bzrMakeErr("Auto Fail") end,
+    },
+  }
+)
+
+-- The entire test suite object, complete with descriptions of each test,
+-- functions testing each thing, and the result, which can used to display
+-- directly in the launcher for in-app debugging.
+local BZR_TESTS: BzrTestTable = bzrCreateTestTable({
+  BZR_FLATPAK_SANITIZE_TESTS,
+})
+
+
+  -- -- === SECTION: bzrUserInputSanitize VALIDATION === --
+  --
+  -- -- Tests valid user input stays the same
+  -- test_ValidUserInputStaysSame: BzrTestResult?,
+  -- -- Tests invalid user input is correctly sanitized
+  -- test_InvalidUserInputSanitization: BzrTestResult?,
+  -- -- Tests non-local characters are not sanitized out,
+  -- -- some flatpaks have these characters in their titles
+  -- -- and I don't want to remove them if possible.
+  -- test_DifferentLocaleSanitization: BzrTestResult?,
+  -- -- Ensure command injection cannot happen via user input
+  -- -- sanitization
+  -- test_NoUserInputCommandInjection: BzrTestResult?,
+  --
+  -- -- === SECTION: bzrCreateErrorReport VALIDATION === --
+  --
+  -- -- Tests that passed in values affect the returned table spec,
+  -- -- and values are set correctly
+  -- test_CreateErrorReportValuesCorrect: BzrTestResult?,
+  -- -- Tests that optional values are, in fact, optional, and return
+  -- -- certain specified values
+  -- test_OptionalCreateErrorReportValues: BzrTestResult?,
+  -- -- Tests that non-optional values are, in fact, not optional, and
+  -- -- throw an error when omitted
+  -- test_NonOptionalCreateErrorReportValues: BzrTestResult?,
+  --
+  -- -- === SECTION: bzrGetMetadata VALIDATION === --
+  --
+  -- -- === SECTION: bzrInitialSearch VALIDATION === --
+  --
+  -- -- === SECTION: PLUGIN SETTINGS VALIDATION === --
+  --
+  -- -- Tests whether a low `max_entries` value will actually
+  -- -- limit the number of Flatpak responses returned
+  -- test_MaxEntriesValueAffectsOutput: BzrTestResult?,
+  -- -- Tests whether LESS THAN `max_entries` entries can appear
+  -- test_MaxEntriesIsMaximum: BzrTestResult?,
+  --
+  -- -- === SECTION: RACE CONDITION CHECKS === --
+  --
+  -- -- Tests whether quickly changing user input will
+  -- -- cause invalid queries to run and finish
+  -- test_QuickUserInputChangesRaceConds: BzrTestResult?,
+  --
+  -- -- === SECTION: DEPENDENCIES CHECK === --
+  --
+  -- -- Tests whether the plugin will stop if `busctl` is not found
+  -- -- in the PATH
+  -- test_NoBusctlStopsQuery: BzrTestResult?,
+
+-- ==================================== --
+-- ===== TEST MODE IMPLEMENTATION ===== --
+-- ==================================== --
+
+-- Common Testmode buttons that I don't want to re-write every
+-- time they show up
+local BZR_COMMON_BUTTONS: {[string]: LauncherResult} = {
+  -- Button that returns the user to the categories page
+  goto_categories = {
+    id = "test:action:gotocategories",
+    title = "Show Test Categories",
+    glyph = "category-2",
+  },
+
+  -- Button that returns the user to the general
+  -- Flatpak search page (removes .dbg from query)
+  return_pluginsearch = {
+    id = "test:action:returnhome",
+    title = "Return to Search",
+    glyph = "arrow-back",
+  },
+
+  -- Returns the user to the root of the testmenu
+  return_testmenu = {
+    id = "test:action:returntestmenu",
+    title = "Return to Test Menu",
+    glyph = "arrow-back",
+  },
+}
+
+-- This function runs a single test and populates the result value.
+-- Because a lot of async actions happen during these tests, this
+-- function will wait until the test considers itself concluded before
+-- continuing. This is so that each test can run on its own, without
+-- causing race conditions amongst each other.
+local function bzrRunSingleTest(test_desc: BzrTestDescriptor)
+  -- return value is success/failure of test
+  local test_result = test_desc.test_fn()
+  test_desc.result = test_result
+end
+-- This function runs every test in a given category.
+
+-- This is the actual function that runs every single test.
+
+-- This function takes a query beginning with .dbg and
+-- loads the test mode menu based on the format of the
+-- query
+local function bzrTestModeHandleQuery(query: string)
+  
+  -- Internal helper function for creating a row description
+  -- containing test result statuses
+  local function _genTestRow(action: string, category_id: string, test_description: BzrTestDescriptor): LauncherResult
+  
+    return {
+      id = "test:" .. action .. ":" .. category_id .. "/" .. test_description.id,
+      title = (test_description.result == nil and "[NOT RUN] " or
+              test_description.result and test_description.result.ok and "[SUCCESS] " or
+              test_description.result and not test_description.result.ok and "[FAIL] "
+              or ""),
+      glyph = test_description.result == nil and "dots-circle-horizontal" or
+              test_description.result and test_description.result.ok and "circle-check" or
+              test_description.result and not test_description.result.ok and "exclamation-circle" or
+              "adjustments-question",
+    }
+  end
+
+  -- Check for a query substring - show different menus based on
+  -- what we find.
+  local query_substr: string? = query:match("^%.dbg%s+(.*)$")
+  if query_substr then
+
+    -- If query substring is "category:<category_id> test:<test_id>",
+    -- go to the test's page.
+    local findtest_category_id: string?, findtest_test_id: string? = query_substr:match("^category:([%w_]+)%s+test:([%w_]+)")
+    if findtest_category_id and findtest_test_id then
+      local both_exist = BZR_TESTS.categories[findtest_category_id] and
+                          BZR_TESTS.categories[findtest_category_id].tests[findtest_test_id]
+      if not both_exist then
+        launcher.setResults(query, {{
+          id = BZR_COMMON_BUTTONS.return_testmenu.id,
+          title = BZR_COMMON_BUTTONS.return_testmenu.title,
+          subtitle = "Selected test does not exist.",
+          glyph = BZR_COMMON_BUTTONS.return_testmenu.glyph,
+        }})
+        return
+      end
+
+      -- We know that the test exists now, so show details about it.
+      local test_description: BzrTestDescriptor = BZR_TESTS
+        .categories[findtest_category_id]
+        .tests[findtest_test_id]
+
+      local generated_run_button: LauncherResult = _genTestRow("runtest", findtest_category_id, test_description)
+      generated_run_button.subtitle = "Select this to run the test"
+
+      local error_msg = test_description.result and test_description.result.ok == false and test_description.result.err or ""
+
+      local buttons: {LauncherResult} = {
+        {
+          id = "",
+          title = test_description.name,
+          subtitle = "ID: " .. test_description.id,
+          glyph = "notes",
+        },
+        generated_run_button,
+        {
+          id = "bzrerror:" .. error_msg,
+          title = "Error message (if it exists)",
+          subtitle = error_msg,
+          glyph = "clipboard-x",
+        },
+        BZR_COMMON_BUTTONS.goto_categories,
+        BZR_COMMON_BUTTONS.return_testmenu,
+      }
+
+      launcher.setResults(query, buttons)
+      return
+    end
+    
+    -- If query substring is "categories", show list of categories
+    if query_substr == "categories" then
+      -- loop through categories and display a row based
+      -- on its information
+      local tbl_results: {LauncherResult} = {}
+      for i=1,#BZR_TESTS.order do
+        local category_id: string = BZR_TESTS.order[i]
+        local launcher_res: LauncherResult = {
+          id = "test:viewcategory:" .. category_id,
+          title = BZR_TESTS.categories[category_id].name,
+          subtitle = BZR_TESTS.categories[category_id].description,
+          glyph = "arrow-badge-right",
+        }
+        table.insert(tbl_results, launcher_res)
+      end
+
+      -- insert "return to test menu" option
+      table.insert(tbl_results, BZR_COMMON_BUTTONS.return_testmenu)
+      launcher.setResults(query, tbl_results)
+      return
+    end
+
+
+    -- If query has category:<categoryname> directly after
+    -- `.dbg`, then show category page, if it exists
+    local category_match: string? = query_substr:match("^category:([%w_]+)")
+    if category_match and BZR_TESTS.categories[category_match] then
+      local category_ref: BzrTestCategory = BZR_TESTS.categories[category_match]
+      local tbl_results: {LauncherResult} = {}
+      for j=1,#category_ref.order do
+        local test_id = category_ref.order[j]
+        local test_desc: BzrTestDescriptor = category_ref.tests[test_id]
+        local result: LauncherResult = _genTestRow("view", category_match, test_desc)
+
+        -- This cast is done because we can guarantee that "title" will
+        -- be fulfilled from the function call
+        result.title = result.title::string .. test_desc.name
+        table.insert(tbl_results, result)
+      end
+
+      -- Add "Go Back To Test Menu" Button
+      table.insert(tbl_results, BZR_COMMON_BUTTONS.return_testmenu)
+      
+      -- we've aggregated our things, now display them
+      launcher.setResults(query, tbl_results)
+    end
+
+    return
+  end
+
+  -- Else, show main test menu
+  launcher.setResults(query, {
+    BZR_COMMON_BUTTONS.goto_categories,
+    BZR_COMMON_BUTTONS.return_pluginsearch,
+  })
+end
+
 
 -- ================================================ --
 -- ===== NOCTALIA LAUNCHER OVERRIDE FUNCTIONS ===== --
 -- ================================================ --
 
 -- onQuery is what we call when the search text changes
-function onQuery(query)
+function onQuery(query: string)
+
+  BZR_CURRENT_QUERY = query
+  local trimmed_query = noctalia.string.trim(query)
+
+
   if not noctalia.commandExists("busctl") then
     -- No busctl command, display error
-    launcher.setResults(query, {bzrCreateErrorReport({
+    BZR_CURRENT_QUERY = nil
+    bzrNotifyError(query, {
       cmd_string = "noctalia.commandExists(\"busctl\")",
       query = query,
       stage = "onQuery",
       err_title = "'busctl' is not found in the PATH",
       err_body = "Please make sure that 'busctl' is installed and is correctly set somewhere along the PATH",
-    })})
+    })
     return
   end
 
   -- Test mode enabled, as well as typing in test phrase
-  if noctalia.getConfig("testmode_enable") and query == ".dbg" then
-    launcher.setResults(query, {{
-      id = "test:test",
-      title = "Testmode Active",
-    }})
-    return
+  if noctalia.getConfig("testmode_enable") then
+    local forced_reload_path = query:match("^.dbg forcereload (.*)$")
+    if forced_reload_path then
+      BZR_CURRENT_QUERY = nil
+      launcher.setResults(query, {{}})
+      launcher.setQuery(forced_reload_path)
+      return
+    end
+    if trimmed_query:sub(1, 4) == ".dbg" then
+      BZR_CURRENT_QUERY = nil
+      bzrTestModeHandleQuery(query)
+      return
+    end
   end
 
   -- Otherwise, do Bazaar search
-  local result_step1: BzrResult<BzrInitialSearchReturn, LauncherResult> = bzrInitialSearch(query)
-  if not result_step1.ok then
-    -- something went wrong in first part, display said
-    -- error to user
-    launcher.setResults(query, { result_step1.err })
-    return
-  end
-
-  -- Step 2 of Bazaar search
-  local step1_entries: BzrInitialSearchReturn = result_step1.data
-  local result_step2 = bzrGetMetadata(query, step1_entries)
-  if not result_step2.ok then
-    launcher.setResults(query, { result_step2.err} )
-    return
-  end
-
-  -- Everything seems to have gone okay, so put results on screen
-  local entries: {LauncherResult} = result_step2.data
-  launcher.setResults(query, entries)
+  bzrInitialSearch(query, bzrNotifyError)
 end
 
 --onActivate is what is called when we press Enter on something
@@ -402,6 +771,94 @@ function onActivate(id: string)
     noctalia.notify("Bazaar Search Error", "Error message copied to clipboard.")
     return
   end
+
+  -- Handle test-mode commands
+  local test_cmd = id:match("^test:(.+)$")
+  if test_cmd then
+    local subcmd: string?, tertcmd: string? = test_cmd:match("^(.+):(.+)$")
+    if not subcmd or not tertcmd then
+      noctalia.notifyError("Bazaar Testmode Error", "Given test command \"" .. id .. "\" is invalid.")
+      return 
+    end
+
+    local cmd_table: { [string]: { [string]: () -> ()} | (param: string) -> () } = {
+      action = {
+        gotocategories = function()
+          -- Go to categories page
+          launcher.setQuery(".dbg categories")
+        end,
+        returnhome = function()
+          -- Return to search bar without closing launcher
+          launcher.setQuery(" ")
+        end,
+        returntestmenu = function()
+          launcher.setQuery(".dbg")
+        end,
+      },
+      runtest = function(param: string)
+        -- param is a string in the format "<category_id>/<test_id>",
+        -- so run test, then re-evaluate page
+        local category_id: string?, test_id: string? = param:match("^(.*)/(.*)$")
+        if not category_id or not test_id then
+          noctalia.notifyError(
+            "Bazaar Testmode Error: Bad Category/Test ID for `runtest`",
+            "Category: " .. tostring(category_id) .. ", Test: " .. tostring(test_id)
+          )
+          return
+        end
+        if BZR_TESTS.categories[category_id] and BZR_TESTS.categories[category_id].tests[test_id] then
+          -- Run that test
+          bzrRunSingleTest(BZR_TESTS.categories[category_id].tests[test_id])
+          
+          -- Go back to the individual test's page
+          launcher.setQuery(".dbg forcereload .dbg category:" .. category_id .. " test:" .. test_id)
+          return
+        else
+          noctalia.notifyError(
+            "Bazaar Testmode Error: No such test for `runtest`",
+            "Category: " .. tostring(category_id) .. ", Test: " .. tostring(test_id)
+          )
+          return
+        end
+      end,
+      view = function(param: string)
+        -- param is a string in the format "<category_id>/<test_id>",
+        -- so navigate to the specified test's page
+        local category_id: string?, test_id: string? = param:match("^(.*)/(.*)$")
+        if not category_id or not test_id then
+          noctalia.notifyError(
+            "Bazaar Testmode Error: Bad Category/Test ID",
+            "Category: " .. tostring(category_id) .. ", Test: " .. tostring(test_id)
+          )
+          return
+        end
+        launcher.setQuery(".dbg category:" .. category_id .. " test:" .. test_id)
+      end,
+      viewcategory = function(param: string)
+        -- param in this case will be the id of a category,
+        -- so simply update the query with category:<id>
+        launcher.setQuery(".dbg category:" .. param)
+      end,
+    }
+    
+    -- Check if command in table leads to another table, or directly to
+    -- a function with `tertcmd` as an argument
+    if cmd_table[subcmd] and type(cmd_table[subcmd]) == "table" then
+      local subcmd_tbl: { [string]: () -> () } = cmd_table[subcmd] :: { [string]: () -> () }
+      if subcmd_tbl[tertcmd] then
+        subcmd_tbl[tertcmd]()
+        return
+      end
+    elseif cmd_table[subcmd] and type(cmd_table[subcmd]) == "function" then
+      local subcmd_fun: (param: string) -> () = cmd_table[subcmd] :: (param: string) -> ()
+      subcmd_fun(tertcmd)
+      return
+    else
+      noctalia.notifyError("Bazaar Testmode Error", "Given test command \"" .. id .. "\" does not exist.")
+      return
+    end
+  end
+
   if id ~= "" then
     local sanitized_fltpk = bzrFlatpakIDSanitize(id)
     if sanitized_fltpk == id then
