@@ -471,20 +471,53 @@ local BZR_FLATPAK_SANITIZE_TESTS: BzrTestCategory = bzrCreateTestCategory(
   }
 )
 
--- The entire test suite object, complete with descriptions of each test,
--- functions testing each thing, and the result, which can used to display
--- directly in the launcher for in-app debugging.
-local BZR_TESTS: BzrTestTable = bzrCreateTestTable({
-  BZR_FLATPAK_SANITIZE_TESTS,
-})
 
-
-  -- -- === SECTION: bzrUserInputSanitize VALIDATION === --
-  --
-  -- -- Tests valid user input stays the same
-  -- test_ValidUserInputStaysSame: BzrTestResult?,
-  -- -- Tests invalid user input is correctly sanitized
-  -- test_InvalidUserInputSanitization: BzrTestResult?,
+-- -- === SECTION: bzrUserInputSanitize VALIDATION === --
+local BZR_USER_INPUT_TESTS: BzrTestCategory = bzrCreateTestCategory(
+  {
+    id = "userinput_sanitize",
+    name = "User Input Sanitization Tests",
+    description = "Tests that relate to unexpected user input",
+  },
+  {
+    {
+      id = "test_ValidUserInputStaysSame",
+      name = "Test Valid User Input is Untouched",
+      description = "Ensures that expected and valid input is unchanged from how the user inputted it",
+      test_fn = function()
+        local cases = { "hi there", "debug.world", "com.nextcloud.Nextcloud", "peace!" }
+        for i=1, #cases do
+          local sanitized = bzrUserInputSanitize(cases[i])
+          if cases[i] ~= sanitized then
+            return bzrMakeErr("Input \"" .. cases[i] ..
+                              "\" should have remained unchanged. Recieved \"" ..
+                              sanitized .. "\"")
+          end
+        end
+        return bzrMakeOk(nil)
+      end,
+    },
+    {
+      id = "test_InvalidUserInputSanitization",
+      name = "Test Invalid User Input is correctly sanitized",
+      description = "Ensures unexpected and potentially malicious input is sanitized correctly",
+      test_fn = function()
+        local cases = { "he$ll`o\\\"", "pa$sw0rd", "$(sudo cat /etc/shadow)" }
+        local correct = { "hello", "pasw0rd", "(sudo cat /etc/shadow)" }
+        for i=1, #cases do
+          local sanitized = bzrUserInputSanitize(cases[i])
+          if correct[i] ~= sanitized then
+            return bzrMakeErr("Sanitized input \"" .. cases[i] ..
+                              "\". Should have returned \"" ..
+                              correct[i] .. "\", but recieved \"" ..
+                              sanitized .. "\"")
+          end
+        end
+        return bzrMakeOk(nil)
+      end,
+    },
+  }
+)
   -- -- Tests non-local characters are not sanitized out,
   -- -- some flatpaks have these characters in their titles
   -- -- and I don't want to remove them if possible.
@@ -492,6 +525,16 @@ local BZR_TESTS: BzrTestTable = bzrCreateTestTable({
   -- -- Ensure command injection cannot happen via user input
   -- -- sanitization
   -- test_NoUserInputCommandInjection: BzrTestResult?,
+
+-- The entire test suite object, complete with descriptions of each test,
+-- functions testing each thing, and the result, which can used to display
+-- directly in the launcher for in-app debugging.
+local BZR_TESTS: BzrTestTable = bzrCreateTestTable({
+  BZR_FLATPAK_SANITIZE_TESTS,
+  BZR_USER_INPUT_TESTS,
+})
+
+
   --
   -- -- === SECTION: bzrCreateErrorReport VALIDATION === --
   --
