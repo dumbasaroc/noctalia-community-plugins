@@ -153,7 +153,7 @@ local BZR_CURRENT_QUERY: string | nil = nil
 --
 -- Returns the sanitized string
 local function bzrFlatpakIDSanitize(s: string): string
-  local retval, _ = s:gsub("[^[a-z][A-Z][0-9]_%-%.]", "")
+  local retval, _ = s:gsub("[^a-zA-Z0-9_%-%.]", "")
   return retval
 end
 
@@ -416,12 +416,6 @@ local function bzrInitialSearch(query: string, bzr_err_func: BzrNotifyErrorFunct
 end
 
 
-
--- ============================================= --
--- ===== TEST MODE FUNCTIONS AND HARNESSES ===== --
--- ============================================= --
-
-
 -- ================================= --
 -- ===== TEST MODE DESCRIPTORS ===== --
 -- ================================= --
@@ -473,13 +467,6 @@ local BZR_FLATPAK_SANITIZE_TESTS: BzrTestCategory = bzrCreateTestCategory(
 
         return bzrMakeOk(nil)
       end,
-    },
-
-    {
-      id = "test_AutoFail",
-      name = "This should automatically fail",
-      description = "This should automatically fail",
-      test_fn = function() return bzrMakeErr("Auto Fail") end,
     },
   }
 )
